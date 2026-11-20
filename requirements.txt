@@ -1,0 +1,4 @@
+numpy
+pillow
+tkinterdnd2
+openpyxl
