@@ -10,7 +10,7 @@ import fingerprint as fpm
 import matcher
 import sources
 
-DEFAULTS = {"broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0}
+DEFAULTS = {"mode": "quick", "broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0}
 
 
 def fmt_size(n):
@@ -38,11 +38,24 @@ class Scan:
     def say(self, stage, text, frac=None):
         self.cb(stage, text, frac)
 
+    def log(self, msg):
+        """기록 파일(문제 생겼을 때 원인 확인용) — 이 PC 안에만 저장"""
+        try:
+            p = os.path.join(cachemod.data_dir(), "log.txt")
+            if os.path.exists(p) and os.path.getsize(p) > 2_000_000:
+                os.replace(p, p + ".old")
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+        except Exception:
+            pass
+
     # ─────────────────────────────────────
     def run(self):
         t0 = time.time()
         opts = self.opts
+        quick = opts.get("mode") == "quick"
         mode = ("p" if opts["precise"] else "k") + ("a" if opts["audio"] else "n")
+        self.log(f"검사 시작 ({'빠른 검사' if quick else '내용 검사'}): " + ", ".join(s.label() for s in self.srcs.values()))
         items = []
         for s in self.srcs.values():
             self.say("list", f"목록 읽는 중: {s.label()}")
@@ -56,6 +69,7 @@ class Scan:
             it["id"] = f"i{i}"
             it["key"] = self.cache.key(it, fpm.FP_VERSION, mode)
         self.say("list", f"영상 파일 {len(items)}개")
+        self.log(f"영상 파일 {len(items)}개")
         byid = {it["id"]: it for it in items}
 
         # 1) 완전히 같은 파일
@@ -67,6 +81,15 @@ class Scan:
             for x in g[1:]:
                 copy_of[x["id"]] = g[0]["id"]
         reps = [it for it in items if it["id"] not in copy_of]
+        self.log(f"완전히 같은 파일 {len(exact_groups)}묶음")
+
+        if quick:
+            # 빠른 검사: 영상을 열지 않음 → 완전히 같은 파일 + 0바이트 파일만
+            broken = [{"id": it["id"], "kind": "broken", "msg": "빈 파일 (0바이트)", "at": 0}
+                      for it in items if it["size"] == 0]
+            sets = self._group(byid, exact_groups, [])
+            self.log(f"검사 끝 {time.time() - t0:.0f}초")
+            return self._result(t0, items, sets, broken)
 
         # 2) 영상 분석
         broken = []
@@ -111,6 +134,13 @@ class Scan:
         self.say("match", f"비교 끝 · 겹침 {len(rels)}건", 1)
 
         sets = self._group(byid, exact_groups, rels)
+        self.log(f"검사 끝 {time.time() - t0:.0f}초 · 겹침 {len(rels)}건")
+        if not opts["broken"]:
+            broken = [b for b in broken if b["kind"] == "readfail"]
+        return self._result(t0, items, sets, broken)
+
+    def _result(self, t0, items, sets, broken):
+        opts = self.opts
         res = {
             "version": 1,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -121,21 +151,24 @@ class Scan:
             "options": opts,
             "items": {it["id"]: _slim(it) for it in items},
             "sets": sets,
-            "broken": broken if opts["broken"] else [b for b in broken if b["kind"] == "readfail"],
+            "broken": broken,
             "count": len(items),
         }
         return res
 
     # ─────────────────────────────────────
     def _exact(self, items):
+        """크기 같은 파일 → 앞·가운데·뒤 조각 해시 → (일반 폴더는) 전체 해시로 확정. 영상으로 열지 않음"""
         by_size = {}
         for it in items:
             if it["size"] > 0:
                 by_size.setdefault(it["size"], []).append(it)
         cand = [g for g in by_size.values() if len(g) > 1]
         total = sum(len(g) for g in cand)
+        self.log(f"같은 크기 파일 {total}개")
         done = 0
         groups = []
+        qgroups = []
         for g in cand:
             byq = {}
             for it in g:
@@ -146,7 +179,8 @@ class Scan:
                 if not q:
                     try:
                         q = fpm.quick_hash(self.srcs[it["src"]], it)
-                    except Exception:
+                    except Exception as e:
+                        self.log(f"조각 해시 실패: {it['path']} · {e}")
                         q = None
                     if q:
                         if c:
@@ -154,31 +188,54 @@ class Scan:
                         else:
                             self.cache.put(it["key"], qhash=q)
                 done += 1
-                self.say("hash", f"같은 크기 파일 확인 {done}/{total}", done / max(1, total))
+                self.say("hash", f"같은 크기 파일 빠르게 비교 {done}/{total} · {it['name']}", done / max(1, total) * 0.3)
                 if q:
                     byq.setdefault(q, []).append(it)
-            for qg in byq.values():
-                if len(qg) < 2:
-                    continue
-                # 일반 폴더는 전체 해시로 한 번 더 확인
-                if all(self.srcs[x["src"]].kind == "local" for x in qg):
-                    byf = {}
-                    for it in qg:
-                        c = self.cache.get(it["key"]) or {}
-                        fh = c.get("fhash")
-                        if not fh:
-                            self.say("hash", f"완전 동일 확인 중: {it['name']}")
-                            try:
-                                fh = fpm.full_hash(self.srcs[it["src"]], it, self.stopped)
-                            except Exception:
-                                fh = None
-                            if fh:
-                                self.cache.set_field(it["key"], "fhash", fh)
+            qgroups += [x for x in byq.values() if len(x) > 1]
+        # 전체 해시 (진행률은 읽은 용량 기준)
+        need = [it for qg in qgroups if all(self.srcs[x["src"]].kind == "local" for x in qg) for it in qg]
+        tot_b = sum(it["size"] for it in need) or 1
+        st = {"b": 0, "t0": time.time(), "last": 0}
+
+        def prog(n, name):
+            st["b"] += n
+            now = time.time()
+            if now - st["last"] > 0.25:
+                st["last"] = now
+                fr = st["b"] / tot_b
+                el = now - st["t0"]
+                eta = f" · 남은 시간 약 {fpm.fmt_t(el / fr * (1 - fr))}" if fr > 0.01 and el > 3 else ""
+                self.say("hash", f"완전히 같은지 끝까지 확인 {fmt_size(st['b'])}/{fmt_size(tot_b)}{eta} · {name}",
+                         0.3 + 0.7 * fr)
+
+        for qg in qgroups:
+            if all(self.srcs[x["src"]].kind == "local" for x in qg):
+                byf = {}
+                for it in qg:
+                    if self.stopped():
+                        return []
+                    c = self.cache.get(it["key"]) or {}
+                    fh = c.get("fhash")
+                    if not fh:
+                        self.log(f"전체 해시: {it['path']} ({fmt_size(it['size'])})")
+                        try:
+                            fh = fpm.full_hash(self.srcs[it["src"]], it, self.stopped,
+                                               lambda n, nm=it["name"]: prog(n, nm))
+                        except Exception as e:
+                            self.log(f"전체 해시 실패: {it['path']} · {e}")
+                            fh = None
                         if fh:
-                            byf.setdefault(fh, []).append(it)
-                    groups += [x for x in byf.values() if len(x) > 1]
-                else:
-                    groups.append(qg)
+                            if self.cache.get(it["key"]):
+                                self.cache.set_field(it["key"], "fhash", fh)
+                            else:
+                                self.cache.put(it["key"], fhash=fh)
+                    else:
+                        prog(it["size"], it["name"])
+                    if fh:
+                        byf.setdefault(fh, []).append(it)
+                groups += [x for x in byf.values() if len(x) > 1]
+            else:
+                groups.append(qg)  # FTP 는 조각 해시까지만 (전체를 내려받지 않음)
         for g in groups:
             g.sort(key=lambda x: (len(x["path"]), x["path"]))
         return groups
@@ -207,6 +264,8 @@ class Scan:
                     broken.append(dict(br, id=it["id"]))
                 return
             url = src.input_url(it)
+            self.log(f"읽기 시작: {it['path']} ({fmt_size(it['size'])})")
+            t_file = time.time()
             info = br = None
             vfeat = afeat = None
             thumb = None
@@ -240,6 +299,7 @@ class Scan:
                 ent[it["id"]] = {"info": info, "vid": vfeat, "aud": afeat}
             if br:
                 broken.append(dict(br, id=it["id"]))
+            self.log(f"읽기 끝 {time.time() - t_file:.0f}초: {it['name']}" + (f" · {br['msg']}" if br else ""))
             with lock:
                 state["fresh"] += 1
 
@@ -286,9 +346,12 @@ class Scan:
                 continue
             members = sorted(set(members))
             # 다른 영상을 품고 있는(가장 긴) 것 → 화질 → 비트레이트 → 용량 순으로 남길 것 추천
-            keep = max(members, key=lambda i: matcher.quality_score(byid[i].get("info") or {}, byid[i]["size"]))
             rl = [r for r in strong if r["a"] in members]
             is_exact = frozenset(members) in exact_ids
+            if is_exact:
+                keep = min(members, key=lambda i: (len(byid[i]["path"]), byid[i]["path"]))
+            else:
+                keep = max(members, key=lambda i: matcher.quality_score(byid[i].get("info") or {}, byid[i]["size"]))
             kinds = {r["kind"] for r in rl}
             if is_exact:
                 kind = "exact"

@@ -386,14 +386,17 @@ def quick_hash(src, item):
     return h.hexdigest()
 
 
-def full_hash(src, item, stop=None):
+def full_hash(src, item, stop=None, progress=None):
+    """파일 전체 바이트 해시 (영상으로 열지 않고 데이터만 읽음)"""
     h = hashlib.blake2b(digest_size=20)
     with src.open_stream(item) as f:
         while True:
             if stop and stop():
                 return None
-            c = f.read(1 << 20)
+            c = f.read(4 << 20)
             if not c:
                 break
             h.update(c)
+            if progress:
+                progress(len(c))
     return h.hexdigest()

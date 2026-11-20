@@ -85,7 +85,7 @@ def run(log=print):
     log(f"샘플 생성 {time.time() - t0:.1f}s")
     cdb = cachemod.Cache(os.path.join(d, "_cache.db"))
     msgs = []
-    sc = scanner.Scan([sources.LocalSource(d)], {"broken": True, "audio": True}, lambda *a: msgs.append(a), cdb)
+    sc = scanner.Scan([sources.LocalSource(d)], {"mode": "content", "broken": True, "audio": True}, lambda *a: msgs.append(a), cdb)
     t1 = time.time()
     res = sc.run()
     log(f"검사 {time.time() - t1:.1f}s · 파일 {res['count']}")
@@ -131,8 +131,35 @@ def run(log=print):
         ok = False
     # 두 번째 검사는 캐시로 빨라야 함
     t2 = time.time()
-    scanner.Scan([sources.LocalSource(d)], {"broken": True, "audio": True}, None, cdb).run()
+    scanner.Scan([sources.LocalSource(d)], {"mode": "content", "broken": True, "audio": True}, None, cdb).run()
     log(f"재검사(캐시) {time.time() - t2:.1f}s")
+    # 빠른 검사: 영상을 절대 열지 않아야 함 (FFmpeg 호출되면 실패)
+    import fingerprint
+    saved = (fftools.run, fftools.popen, fingerprint.thumbnail)
+
+    def blocked(*a, **k):
+        raise AssertionError("빠른 검사에서 영상을 열었음")
+
+    fftools.run = fftools.popen = fingerprint.thumbnail = blocked
+    try:
+        qc = cachemod.Cache(os.path.join(d, "_cache_q.db"))
+        t3 = time.time()
+        qr = scanner.Scan([sources.LocalSource(d)], {"mode": "quick"}, None, qc).run()
+        qc.close()
+        log(f"빠른 검사 {time.time() - t3:.2f}s")
+        qsets = [sorted(qr["items"][i]["name"] for i in s["items"]) for s in qr["sets"]]
+        log("빠른 검사 세트:", qsets, "깨짐:", [qr["items"][b["id"]]["name"] for b in qr["broken"]])
+        if qsets != [["원본 A 복사.mp4", "원본 A.mp4"]] or [qr["items"][b["id"]]["name"] for b in qr["broken"]] != ["깨짐_빈파일.mp4"]:
+            log("FAIL 빠른 검사 결과 이상")
+            ok = False
+        if qr["items"][qr["sets"][0]["keep"]]["name"] != "원본 A.mp4":
+            log("FAIL 빠른 검사 남김 추천")
+            ok = False
+    except AssertionError as e:
+        log("FAIL", e)
+        ok = False
+    finally:
+        fftools.run, fftools.popen, fingerprint.thumbnail = saved
     cdb.close()
     log("selftest ok" if ok else "selftest FAIL")
     return ok, d, res

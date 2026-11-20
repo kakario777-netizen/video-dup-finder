@@ -42,7 +42,7 @@ def cfg_path():
 
 
 def load_cfg():
-    c = {"targets": [], "broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0,
+    c = {"targets": [], "mode": "quick", "broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0,
          "dest": "", "geometry": "1480x920", "hide_done": False}
     try:
         with open(cfg_path(), encoding="utf-8") as f:
@@ -83,9 +83,10 @@ def fit_image(path, w, h, bg=(24, 24, 24)):
     return canvas
 
 
-def label_info(info, size):
+def label_info(info, size, mtime=0):
     if not info:
-        return scanner.fmt_size(size)
+        t = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)) if mtime else ""
+        return " · ".join(x for x in (scanner.fmt_size(size), f"{size:,} 바이트", t and "수정 " + t) if x)
     br = info.get("bitrate") or 0
     parts = [fpm.fmt_t(info.get("duration")), results.res_text(info), (info.get("vcodec") or "").upper(),
              scanner.fmt_size(size)]
@@ -206,20 +207,33 @@ class App:
             except Exception:
                 pass
         # 옵션
-        of = ttk.LabelFrame(top, text=" 검사 방법 ", padding=6)
+        of = ttk.LabelFrame(top, text=" 검사 방식 ", padding=6)
         of.pack(side="left", fill="y", padx=8)
+        self.v_mode = tk.StringVar(value=self.cfg.get("mode") or "quick")
         self.v_broken = tk.BooleanVar(value=self.cfg["broken"])
         self.v_audio = tk.BooleanVar(value=self.cfg["audio"])
         self.v_precise = tk.BooleanVar(value=self.cfg["precise"])
         self.v_sens = tk.StringVar(value=self.cfg["sens"])
-        ttk.Checkbutton(of, text="깨진 영상도 찾기", variable=self.v_broken).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(of, text="소리도 비교", variable=self.v_audio).grid(row=1, column=0, sticky="w")
-        ttk.Checkbutton(of, text="정밀 검사 (모든 장면 확인 · 느림)", variable=self.v_precise).grid(row=2, column=0, sticky="w")
-        sf = ttk.Frame(of)
-        sf.grid(row=0, column=1, rowspan=3, padx=(12, 0), sticky="n")
-        ttk.Label(sf, text="찾는 민감도").pack(anchor="w")
-        ttk.Combobox(sf, textvariable=self.v_sens, values=["보통", "높음", "엄격"], width=7, state="readonly").pack(anchor="w")
-        ttk.Label(sf, text="높음: 많이 찾음\n엄격: 확실한 것만", foreground="#777").pack(anchor="w", pady=(2, 0))
+        ttk.Radiobutton(of, text="빠른 검사 — 완전히 같은 파일만 (영상을 열지 않음)", value="quick",
+                        variable=self.v_mode, command=self._mode_changed).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Radiobutton(of, text="내용 검사 — 화질·길이·자막이 달라도 찾음 (느림)", value="content",
+                        variable=self.v_mode, command=self._mode_changed).grid(row=1, column=0, columnspan=2, sticky="w")
+        self.opt_ws = []
+        sub = ttk.Frame(of)
+        sub.grid(row=2, column=0, columnspan=2, sticky="w", padx=(22, 0))
+        for k, (t, v) in enumerate((("깨진 영상도 찾기", self.v_broken), ("소리도 비교", self.v_audio),
+                                    ("정밀 검사 (모든 장면)", self.v_precise))):
+            w = ttk.Checkbutton(sub, text=t, variable=v)
+            w.grid(row=0, column=k, sticky="w", padx=(0, 8))
+            self.opt_ws.append(w)
+        sf = ttk.Frame(sub)
+        sf.grid(row=1, column=0, columnspan=3, sticky="w")
+        ttk.Label(sf, text="찾는 민감도").pack(side="left")
+        w = ttk.Combobox(sf, textvariable=self.v_sens, values=["보통", "높음", "엄격"], width=6, state="readonly")
+        w.pack(side="left", padx=4)
+        self.opt_ws.append(w)
+        ttk.Label(sf, text="(높음: 많이 찾음 · 엄격: 확실한 것만)", foreground="#777").pack(side="left")
+        self._mode_changed()
         # 실행
         rf = ttk.Frame(top)
         rf.pack(side="left", fill="y")
@@ -331,6 +345,14 @@ class App:
         self.mtree.pack(side="left", fill="both", expand=True)
         msb.pack(side="right", fill="y")
 
+    def _mode_changed(self):
+        on = self.v_mode.get() == "content"
+        for w in self.opt_ws:
+            try:
+                w.config(state=("readonly" if isinstance(w, ttk.Combobox) else "normal") if on else "disabled")
+            except Exception:
+                pass
+
     # ───────────────────────── 검사할 곳 ─────────────────────────
     def _refresh_targets(self):
         self.tlist.delete(0, "end")
@@ -389,7 +411,8 @@ class App:
 
     # ───────────────────────── 검사 ─────────────────────────
     def _opts(self):
-        return {"broken": self.v_broken.get(), "audio": self.v_audio.get(), "precise": self.v_precise.get(),
+        return {"mode": self.v_mode.get(), "broken": self.v_broken.get(), "audio": self.v_audio.get(),
+                "precise": self.v_precise.get(),
                 "sens": self.v_sens.get(), "workers": int(self.cfg.get("workers") or 0)}
 
     def start_scan(self):
@@ -399,7 +422,7 @@ class App:
             messagebox.showinfo(APP_NAME, "검사할 폴더나 FTP를 먼저 추가해주세요.")
             return
         o = self._opts()
-        self.cfg.update({k: o[k] for k in ("broken", "audio", "precise", "sens")})
+        self.cfg.update({k: o[k] for k in ("mode", "broken", "audio", "precise", "sens")})
         save_cfg(self.cfg)
         srcs = []
         for t in self.cfg["targets"]:
@@ -447,7 +470,9 @@ class App:
                     other.append(m)
             if last:
                 _, st, txt, fr = last
-                w = {"list": (0, 0.02), "hash": (0.02, 0.08), "analyze": (0.08, 0.90), "match": (0.90, 1.0)}.get(st, (0, 1))
+                quick = bool(self.scan and self.scan.opts.get("mode") == "quick")
+                w = ({"list": (0, 0.03), "hash": (0.03, 1.0)} if quick else
+                     {"list": (0, 0.02), "hash": (0.02, 0.08), "analyze": (0.08, 0.90), "match": (0.90, 1.0)}).get(st, (0, 1))
                 if fr is not None:
                     self.prog.config(value=1000 * (w[0] + (w[1] - w[0]) * fr))
                 self.status(txt)
@@ -521,7 +546,8 @@ class App:
     def set_result(self, res):
         self.res = res
         self.srcs.update({})
-        self.res_title.config(text=f"{res.get('created', '')} · {', '.join(res.get('targets', []))}")
+        md = "빠른 검사" if (res.get("options") or {}).get("mode") == "quick" else "내용 검사"
+        self.res_title.config(text=f"{res.get('created', '')} · {md} · {', '.join(res.get('targets', []))}")
         self.render_sets()
         self.render_broken()
         self.render_moves()
@@ -565,12 +591,27 @@ class App:
             self._card(s)
         self.rendered = end
 
-    def _thumb(self, path, w=TW, h=TH):
-        key = (path, w, h)
+    def _thumb(self, path, w=TW, h=TH, label=""):
+        key = (path, w, h, label)
         if key not in self.imgs:
-            self.imgs[key] = ImageTk.PhotoImage(fit_image(path, w, h) if path and os.path.exists(path)
-                                                else Image.new("RGB", (w, h), (40, 40, 40)))
+            if path and os.path.exists(path):
+                im = fit_image(path, w, h)
+            else:
+                im = Image.new("RGB", (w, h), (52, 60, 70))
+                if label:
+                    from PIL import ImageDraw
+                    d = ImageDraw.Draw(im)
+                    try:
+                        tw = d.textlength(label)
+                    except Exception:
+                        tw = len(label) * 6
+                    d.text(((w - tw) / 2, h / 2 - 7), label, fill=(220, 225, 230))
+            self.imgs[key] = ImageTk.PhotoImage(im)
         return self.imgs[key]
+
+    @staticmethod
+    def ext_label(it):
+        return os.path.splitext(it["name"])[1].upper().lstrip(".") or "VIDEO"
 
     def best_rel(self, s, iid):
         keep = s["keep"]
@@ -638,7 +679,7 @@ class App:
             it = items[iid]
             row = tk.Frame(card, bg=bg)
             row.pack(fill="x", padx=10, pady=3)
-            im = tk.Label(row, image=self._thumb(it.get("thumb")), bg=bg, cursor="hand2")
+            im = tk.Label(row, image=self._thumb(it.get("thumb"), label=self.ext_label(it)), bg=bg, cursor="hand2")
             im.pack(side="left")
             im.bind("<Button-1>", lambda e, it=it: self.play(it))
             tx = tk.Frame(row, bg=bg)
@@ -652,7 +693,7 @@ class App:
                 tk.Label(nl, text=" 남김 추천 ", bg="#27ae60", fg="white", font=(FONT, 8, "bold")).pack(side="left", padx=6)
             if gone:
                 tk.Label(nl, text=" 이동함 ", bg="#95a5a6", fg="white", font=(FONT, 8, "bold")).pack(side="left", padx=6)
-            tk.Label(tx, text=label_info(it.get("info"), it["size"]), bg=bg, fg="#333", anchor="w").pack(anchor="w")
+            tk.Label(tx, text=label_info(it.get("info"), it["size"], it.get("mtime")), bg=bg, fg="#333", anchor="w").pack(anchor="w")
             tk.Label(tx, text=it["dir"], bg=bg, fg="#777", anchor="w", font=(FONT, 9)).pack(anchor="w")
             rl = self.rel_line(s, iid)
             if rl:
@@ -912,7 +953,7 @@ class DetailDialog(tk.Toplevel):
             strip = tk.Frame(f, bg="#ffffff")
             strip.pack(fill="x", padx=10, pady=4)
             lbls = []
-            for k in range(5):
+            for k in range(5 if info else 0):
                 lb = tk.Label(strip, image=self.app._thumb(it.get("thumb") if k == 0 else None, 200, 112), bg="#ffffff")
                 lb.pack(side="left", padx=(0, 6))
                 lbls.append(lb)
@@ -920,7 +961,12 @@ class DetailDialog(tk.Toplevel):
             det.pack(fill="x", padx=10)
             fps = info.get("fps") or 0
             rows = [("위치", it["dir"]),
-                    ("용량", f"{scanner.fmt_size(it['size'])} ({it['size']:,} 바이트)"),
+                    ("용량", f"{scanner.fmt_size(it['size'])} ({it['size']:,} 바이트)")]
+            if not info:
+                rows += [("수정 날짜", time.strftime("%Y-%m-%d %H:%M", time.localtime(it.get("mtime") or 0))),
+                         ("영상 정보", "빠른 검사라 영상을 열지 않았습니다 (파일 데이터가 완전히 같음)")]
+            else:
+                rows += [
                     ("길이", fpm.fmt_t(info.get("duration"))),
                     ("화질", f"{results.res_text(info)} · {(info.get('vcodec') or '').upper()} · "
                             f"{(info.get('bitrate') or 0) / 1e6:.2f}Mbps · {fps:.2f}fps"),
@@ -968,7 +1014,7 @@ class DetailDialog(tk.Toplevel):
             it = self.res["items"][iid]
             dur = (it.get("info") or {}).get("duration") or 0
             if not dur:
-                continue
+                continue  # 빠른 검사 결과는 영상을 열지 않음
             try:
                 src = self.app.get_src(it["src"])
                 if src.kind == "local" and not os.path.exists(it["path"]):
