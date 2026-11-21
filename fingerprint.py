@@ -363,6 +363,10 @@ def fmt_t(s):
 # ───────────────────────── 썸네일 ─────────────────────────
 def thumbnail(url, dur, out_path, at=None, width=320):
     t = at if at is not None else (min(max(dur * 0.12, 1.0), max(dur - 1, 0)) if dur else 0)
+    try:
+        os.remove(out_path)
+    except OSError:
+        pass
     args = [fftools.FFMPEG, "-nostdin", "-v", "error", "-y"]
     if t > 0:
         args += ["-ss", f"{t:.2f}"]

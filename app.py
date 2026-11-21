@@ -42,7 +42,7 @@ def cfg_path():
 
 
 def load_cfg():
-    c = {"targets": [], "mode": "quick", "broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0,
+    c = {"targets": [], "mode": "quick", "thumbs": True, "broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0,
          "dest": "", "geometry": "1480x920", "hide_done": False}
     try:
         with open(cfg_path(), encoding="utf-8") as f:
@@ -214,8 +214,11 @@ class App:
         self.v_audio = tk.BooleanVar(value=self.cfg["audio"])
         self.v_precise = tk.BooleanVar(value=self.cfg["precise"])
         self.v_sens = tk.StringVar(value=self.cfg["sens"])
+        self.v_thumbs = tk.BooleanVar(value=self.cfg.get("thumbs", True))
         ttk.Radiobutton(of, text="빠른 검사 — 완전히 같은 파일만 (영상을 열지 않음)", value="quick",
-                        variable=self.v_mode, command=self._mode_changed).grid(row=0, column=0, columnspan=2, sticky="w")
+                        variable=self.v_mode, command=self._mode_changed).grid(row=0, column=0, sticky="w")
+        self.w_thumbs = ttk.Checkbutton(of, text="찾은 중복만 썸네일 1장", variable=self.v_thumbs)
+        self.w_thumbs.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Radiobutton(of, text="내용 검사 — 화질·길이·자막이 달라도 찾음 (느림)", value="content",
                         variable=self.v_mode, command=self._mode_changed).grid(row=1, column=0, columnspan=2, sticky="w")
         self.opt_ws = []
@@ -294,8 +297,10 @@ class App:
         cb.bind("<<ComboboxSelected>>", lambda e: self.render_sets())
         self.v_hide = tk.BooleanVar(value=self.cfg.get("hide_done", False))
         ttk.Checkbutton(fb, text="정리 끝난 세트 숨기기", variable=self.v_hide, command=self.render_sets).pack(side="left", padx=8)
+        self.btn_all = ttk.Button(fb, text="한번에 정리", style="Big.TButton", command=self.organize_all)
+        self.btn_all.pack(side="right")
         self.sum_lbl = ttk.Label(fb, text="", foreground="#555")
-        self.sum_lbl.pack(side="right")
+        self.sum_lbl.pack(side="right", padx=8)
         self.list = Scrollable(t1, on_bottom=self._render_more)
         self.list.pack(fill="both", expand=True)
         # 탭2: 깨진 영상
@@ -347,6 +352,7 @@ class App:
 
     def _mode_changed(self):
         on = self.v_mode.get() == "content"
+        self.w_thumbs.config(state="disabled" if on else "normal")
         for w in self.opt_ws:
             try:
                 w.config(state=("readonly" if isinstance(w, ttk.Combobox) else "normal") if on else "disabled")
@@ -411,7 +417,7 @@ class App:
 
     # ───────────────────────── 검사 ─────────────────────────
     def _opts(self):
-        return {"mode": self.v_mode.get(), "broken": self.v_broken.get(), "audio": self.v_audio.get(),
+        return {"mode": self.v_mode.get(), "thumbs": self.v_thumbs.get(), "broken": self.v_broken.get(), "audio": self.v_audio.get(),
                 "precise": self.v_precise.get(),
                 "sens": self.v_sens.get(), "workers": int(self.cfg.get("workers") or 0)}
 
@@ -422,7 +428,7 @@ class App:
             messagebox.showinfo(APP_NAME, "검사할 폴더나 FTP를 먼저 추가해주세요.")
             return
         o = self._opts()
-        self.cfg.update({k: o[k] for k in ("mode", "broken", "audio", "precise", "sens")})
+        self.cfg.update({k: o[k] for k in ("mode", "thumbs", "broken", "audio", "precise", "sens")})
         save_cfg(self.cfg)
         srcs = []
         for t in self.cfg["targets"]:
@@ -471,9 +477,9 @@ class App:
             if last:
                 _, st, txt, fr = last
                 quick = bool(self.scan and self.scan.opts.get("mode") == "quick")
-                w = ({"list": (0, 0.03), "hash": (0.03, 1.0)} if quick else
+                w = ({"list": (0, 0.03), "hash": (0.03, 0.85), "thumb": (0.85, 1.0)} if quick else
                      {"list": (0, 0.02), "hash": (0.02, 0.08), "analyze": (0.08, 0.90), "match": (0.90, 1.0)}).get(st, (0, 1))
-                if fr is not None:
+                if fr is not None and st in ("list", "hash", "analyze", "match", "thumb", "org"):
                     self.prog.config(value=1000 * (w[0] + (w[1] - w[0]) * fr))
                 self.status(txt)
             for m in other:
@@ -551,6 +557,164 @@ class App:
         self.render_sets()
         self.render_broken()
         self.render_moves()
+        threading.Thread(target=self._refresh_side, args=(res,), daemon=True).start()
+
+    def _refresh_side(self, res):
+        """자막·폴더 정보 다시 확인 (저장된 결과를 열었을 때도 최신으로)"""
+        moved = {m.get("item") for m in res.get("moves", []) if not m.get("undone")}
+        ids = [i for x in res["sets"] if x.get("status") != "done" for i in x["items"] if i not in moved]
+        before = {i: json.dumps(res["items"][i].get("side"), sort_keys=True) for i in ids}
+        try:
+            mover.fill_side(res, self.get_src, ids)
+        except Exception:
+            return
+        changed = any(json.dumps(res["items"][i].get("side"), sort_keys=True) != before[i] for i in ids)
+        if changed:
+            self.q.append(("call", lambda: res is self.res and self.rerender_keep()))
+
+    def rerender_keep(self):
+        """스크롤 위치 그대로 두고 다시 그림"""
+        try:
+            y = self.list.canvas.yview()[0]
+        except Exception:
+            y = 0
+        n = self.rendered
+        self.render_sets()
+        while self.rendered < min(n, len(self.view_sets)):
+            self._render_more()
+        self.root.update_idletasks()
+        self.list.canvas.yview_moveto(y)
+
+    # ───────────────────────── 남김/옮김 선택 ─────────────────────────
+    def choice(self, s, iid):
+        """영상별 선택. 남김 = 세트에서 고른 1개(pick) + '추가 남김' 체크한 것, 나머지는 자동으로 옮김"""
+        ch = s.setdefault("choice", {})
+        s.setdefault("pick", s["keep"])
+        c = ch.setdefault(iid, {"subs": "move", "folder": "folder", "extra": False})
+        c.setdefault("extra", False)
+        c.setdefault("subs", "move")
+        c.setdefault("folder", "folder")
+        c["act"] = "keep" if (iid == s["pick"] or c["extra"]) else "move"
+        return c
+
+    def set_pick(self, s, iid):
+        """'남김' 누름 → 이 영상만 남기고 나머지는 옮김 ('추가 남김' 체크한 것은 그대로 남김)"""
+        s["pick"] = iid
+        self.choice(s, iid)["extra"] = False
+        self._choice_changed(s)
+
+    def set_extra(self, s, iid, on):
+        self.choice(s, iid)["extra"] = bool(on)
+        self._choice_changed(s)
+
+    def _choice_changed(self, s):
+        for i in s["items"]:
+            self.choice(s, i)
+        self.update_sum()
+        self.save_soon()
+        self.root.after_idle(lambda: self.refresh_card(s))
+
+    def save_soon(self):
+        if getattr(self, "_save_job", None):
+            self.root.after_cancel(self._save_job)
+
+        def go():
+            self._save_job = None
+            if self.res:
+                try:
+                    results.save(self.res)
+                except Exception:
+                    pass
+
+        self._save_job = self.root.after(1500, go)
+
+    def exec_set(self, s):
+        """세트 하나를 선택(남김/옮김·자막·폴더)대로 정리 → 오류 목록 (작업 스레드에서 호출)"""
+        items = self.res["items"]
+        moved = self.moved_items()
+        ids = [i for i in s["items"] if i not in moved]
+        if any("side" not in items[i] for i in ids):
+            mover.fill_side(self.res, self.get_src, ids)
+        keepers = [i for i in ids if self.choice(s, i)["act"] == "keep"]
+        kid = s["keep"] if s["keep"] in keepers else (keepers[0] if keepers else None)
+        keeper = dict(items[kid], id=kid) if kid else None
+        dest = self.cfg.get("dest") or None
+        errs = []
+        for i in ids:
+            c = self.choice(s, i)
+            if c["act"] != "move":
+                continue
+            it = dict(items[i], id=i)
+            si = it.get("side") or {"subs": [], "lone_folder": False}
+            whole = si.get("lone_folder") and c["folder"] == "folder"
+            if whole and keeper and it["dir"] == keeper["dir"]:
+                whole = False
+            sm = c["subs"] if (c["subs"] != "attach" or keeper) else "move"
+            try:
+                mover.move_item(self.res, self.get_src(it["src"]), it, mover.DUP_FOLDER, dest, sm, si.get("subs") or [],
+                                whole, keeper=keeper, reason=f"세트 {s['no']}")
+            except Exception as e:
+                errs.append(f"{it['name']}: {e}")
+        s["status"] = "done"
+        return errs
+
+    def organize_all(self):
+        """목록에서 '옮김' 표시한 것 전부 한번에 정리 (두 번 확인)"""
+        if not self.res or getattr(self, "busy", False):
+            return
+        items = self.res["items"]
+        moved = self.moved_items()
+        plan, skipped, nfiles, nbytes = [], 0, 0, 0
+        for s in self.res["sets"]:
+            if s.get("status") == "done":
+                continue
+            ids = [i for i in s["items"] if i not in moved]
+            mv = [i for i in ids if self.choice(s, i)["act"] == "move"]
+            kp = [i for i in ids if self.choice(s, i)["act"] == "keep"]
+            if not mv:
+                continue
+            if not kp:
+                skipped += 1
+                continue
+            plan.append(s)
+            nfiles += len(mv)
+            nbytes += sum(items[i]["size"] for i in mv)
+        if not plan:
+            messagebox.showinfo(APP_NAME, "'옮김'으로 표시된 영상이 없습니다." +
+                                (f"\n(남김이 하나도 없는 세트 {skipped}개는 건너뜁니다)" if skipped else ""))
+            return
+        msg = (f"'옮김'으로 표시한 영상 {nfiles}개 ({scanner.fmt_size(nbytes)}, {len(plan)}세트)를 "
+               f"'{mover.DUP_FOLDER}' 폴더로 옮길까요?\n\n자막·폴더는 목록에서 고른 대로 처리합니다.")
+        if skipped:
+            msg += f"\n\n※ 남김이 하나도 없는 세트 {skipped}개는 안전을 위해 건너뜁니다."
+        if not messagebox.askyesno(APP_NAME + " — 한번에 정리 (1/2)", msg):
+            return
+        if not messagebox.askyesno(APP_NAME + " — 마지막 확인 (2/2)",
+                                   f"정말 {nfiles}개를 옮길까요?\n\n지우지 않고 옮기기만 하며, '이동 기록' 탭에서 되돌릴 수 있습니다.",
+                                   icon="warning"):
+            return
+        self.busy = True
+        self.btn_all.config(state="disabled")
+
+        def work():
+            errs = []
+            for k, s in enumerate(plan):
+                self.q.append(("prog", "org", f"정리 중 {k + 1}/{len(plan)}세트 · 세트 {s['no']}", (k + 1) / len(plan)))
+                errs += self.exec_set(s)
+            self.q.append(("call", lambda: self._after_all(errs, nfiles)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_all(self, errs, n):
+        self.busy = False
+        self.btn_all.config(state="normal")
+        results.save(self.res)
+        self.rerender_keep()
+        self.render_broken()
+        self.render_moves()
+        if errs:
+            messagebox.showwarning(APP_NAME, "일부는 옮기지 못했습니다.\n\n" + "\n".join(errs[:15]))
+        self.status(f"한번에 정리 완료 · {n - len(errs)}개 옮김" + (f" · 실패 {len(errs)}개" if errs else ""))
 
     def _set_visible(self, s):
         f = self.v_filter.get()
@@ -565,6 +729,7 @@ class App:
         self.list.clear()
         self.imgs = {}
         self.cards = {}
+        self._keep_vars = []
         self.rendered = 0
         if not self.res:
             return
@@ -575,13 +740,28 @@ class App:
             if s.get("status") != "done":
                 total_save += sum(items[i]["size"] for i in s["items"] if i != s["keep"])
         n_all = len(self.res["sets"])
-        self.sum_lbl.config(text=f"{n_all}세트 · 정리하면 최대 {scanner.fmt_size(total_save)} 확보")
+        self.update_sum()
         self.nb.tab(0, text=f"중복 영상 ({n_all})")
         if not self.view_sets:
             tk.Label(self.list.inner, text="찾은 중복 영상이 없습니다." if not n_all else "표시할 세트가 없습니다.",
                      bg="#f4f5f7", fg="#777", font=(FONT, 12)).pack(pady=40)
             return
         self._render_more()
+
+    def update_sum(self):
+        if not self.res:
+            return
+        items = self.res["items"]
+        moved = self.moved_items()
+        n = b = 0
+        for x in self.res["sets"]:
+            if x.get("status") == "done":
+                continue
+            for i in x["items"]:
+                if i not in moved and self.choice(x, i)["act"] == "move":
+                    n += 1
+                    b += items[i]["size"]
+        self.sum_lbl.config(text=f"{len(self.res['sets'])}세트 · 옮김 표시 {n}개 ({scanner.fmt_size(b)})")
 
     def _render_more(self):
         if not self.res or self.rendered >= len(self.view_sets):
@@ -663,43 +843,107 @@ class App:
         tk.Label(hd, text=f"세트 {s['no']}", bg=bg, font=(FONT, 11, "bold")).pack(side="left")
         tk.Label(hd, text=f" {results.KIND_NAME[s['kind']]} ", bg=KIND_COLOR[s["kind"]], fg="white",
                  font=(FONT, 9, "bold")).pack(side="left", padx=8)
-        free = sum(items[i]["size"] for i in s["items"] if i != s["keep"])
         basis = sorted({r.get("basis", "") for r in s["rels"]} - {""})
-        extra = f"{len(s['items'])}개 · 정리하면 {scanner.fmt_size(free)} 확보"
+        extra = f"{len(s['items'])}개"
         if basis:
             extra += f" · 판정: {', '.join(basis)}"
         elif s["kind"] == "exact":
             extra += " · 판정: 파일 내용(해시) 동일"
         tk.Label(hd, text=extra, bg=bg, fg="#555").pack(side="left")
-        ttk.Button(hd, text="확인 · 정리" if not done else "다시 보기",
+        ttk.Button(hd, text="자세히 보기" if not done else "다시 보기",
                    command=lambda s=s: DetailDialog(self, s)).pack(side="right")
         if done:
             tk.Label(hd, text="정리함", bg=bg, fg="#27ae60", font=(FONT, 10, "bold")).pack(side="right", padx=8)
         for iid in self.ordered(s):
             it = items[iid]
-            row = tk.Frame(card, bg=bg)
-            row.pack(fill="x", padx=10, pady=3)
-            im = tk.Label(row, image=self._thumb(it.get("thumb"), label=self.ext_label(it)), bg=bg, cursor="hand2")
-            im.pack(side="left")
-            im.bind("<Button-1>", lambda e, it=it: self.play(it))
-            tx = tk.Frame(row, bg=bg)
-            tx.pack(side="left", fill="x", expand=True, padx=10)
-            nl = tk.Frame(tx, bg=bg)
-            nl.pack(anchor="w", fill="x")
             gone = iid in moved
-            tk.Label(nl, text=it["name"], bg=bg, font=(FONT, 10, "bold" if not gone else "overstrike"),
+            c = self.choice(s, iid)
+            rbg = bg if (done or gone or c["act"] == "keep") else "#fdf0ee"
+            row = tk.Frame(card, bg=rbg)
+            row.pack(fill="x", padx=6, pady=2)
+            im = tk.Label(row, image=self._thumb(it.get("thumb"), label=self.ext_label(it)), bg=rbg, cursor="hand2")
+            im.pack(side="left", padx=4, pady=4)
+            im.bind("<Button-1>", lambda e, it=it: self.play(it))
+            # 오른쪽: 남김/옮김 + 자막·폴더
+            if not done and not gone:
+                self._row_controls(row, rbg, s, iid)
+            tx = tk.Frame(row, bg=rbg)
+            tx.pack(side="left", fill="x", expand=True, padx=10)
+            nl = tk.Frame(tx, bg=rbg)
+            nl.pack(anchor="w", fill="x")
+            tk.Label(nl, text=it["name"], bg=rbg, font=(FONT, 10, "bold" if not gone else "overstrike"),
                      fg="#222" if not gone else "#999", anchor="w").pack(side="left")
             if iid == s["keep"]:
                 tk.Label(nl, text=" 남김 추천 ", bg="#27ae60", fg="white", font=(FONT, 8, "bold")).pack(side="left", padx=6)
             if gone:
                 tk.Label(nl, text=" 이동함 ", bg="#95a5a6", fg="white", font=(FONT, 8, "bold")).pack(side="left", padx=6)
-            tk.Label(tx, text=label_info(it.get("info"), it["size"], it.get("mtime")), bg=bg, fg="#333", anchor="w").pack(anchor="w")
-            tk.Label(tx, text=it["dir"], bg=bg, fg="#777", anchor="w", font=(FONT, 9)).pack(anchor="w")
+            tk.Label(tx, text=label_info(it.get("info"), it["size"], it.get("mtime")), bg=rbg, fg="#333",
+                     anchor="w").pack(anchor="w")
+            tk.Label(tx, text=it["dir"], bg=rbg, fg="#777", anchor="w", font=(FONT, 9)).pack(anchor="w")
+            si = it.get("side")
+            if si and (si.get("subs") or si.get("lone_folder")) and not gone:
+                bits = []
+                if si.get("subs"):
+                    bits.append(f"자막 {len(si['subs'])}개: {', '.join(si['subs'])}")
+                if si.get("lone_folder"):
+                    bits.append("폴더에 이 영상 하나뿐")
+                tk.Label(tx, text=" · ".join(bits), bg=rbg, fg="#1f618d", anchor="w", font=(FONT, 9),
+                         wraplength=700, justify="left").pack(anchor="w")
             rl = self.rel_line(s, iid)
             if rl:
-                tk.Label(tx, text=rl, bg=bg, fg=KIND_COLOR.get(s["kind"], "#555"), anchor="w",
-                         font=(FONT, 9), wraplength=900, justify="left").pack(anchor="w")
+                tk.Label(tx, text=rl, bg=rbg, fg=KIND_COLOR.get(s["kind"], "#555"), anchor="w",
+                         font=(FONT, 9), wraplength=700, justify="left").pack(anchor="w")
         tk.Frame(card, bg=bg, height=6).pack()
+
+    def _row_controls(self, row, rbg, s, iid):
+        it = self.res["items"][iid]
+        c = self.choice(s, iid)
+        si = it.get("side") or {}
+        box = tk.Frame(row, bg=rbg)
+        box.pack(side="right", padx=8)
+        r1 = tk.Frame(box, bg=rbg)
+        r1.pack(anchor="e")
+        is_pick = s.get("pick") == iid
+        keep = c["act"] == "keep"
+        # 남김(세트에서 하나) — 누르면 나머지는 자동으로 옮김
+        tk.Button(r1, text="● 남김" if is_pick else "○ 남김", width=7, font=(FONT, 10, "bold"),
+                  bg="#27ae60" if is_pick else "#ffffff", fg="white" if is_pick else "#27ae60",
+                  activebackground="#2ecc71", relief="raised" if not is_pick else "sunken", bd=1, cursor="hand2",
+                  command=lambda: self.set_pick(s, iid)).pack(side="left", padx=1)
+        # 추가 남김 — 둘 이상 남기고 싶을 때만
+        ve = tk.BooleanVar(value=c["extra"] and not is_pick)
+        tk.Checkbutton(r1, text="추가 남김", variable=ve, bg=rbg, activebackground=rbg, font=(FONT, 9),
+                       state="disabled" if is_pick else "normal", cursor="hand2",
+                       command=lambda: self.set_extra(s, iid, ve.get())).pack(side="left", padx=(6, 0))
+        self._keep_vars.append(ve)
+        st = tk.Label(r1, text="남김" if keep else "→ 옮김", width=6, font=(FONT, 10, "bold"),
+                      bg=rbg, fg="#27ae60" if keep else "#c0392b")
+        st.pack(side="left", padx=(6, 0))
+        if c["act"] == "move":
+            if si.get("subs"):
+                r2 = tk.Frame(box, bg=rbg)
+                r2.pack(anchor="e", pady=(3, 0))
+                tk.Label(r2, text="자막", bg=rbg, font=(FONT, 9)).pack(side="left")
+                names = {"move": "같이 옮기기", "keep": "그대로 두기", "attach": "남길 영상 옆으로"}
+                rev = {v: k for k, v in names.items()}
+                vs = tk.StringVar(value=names.get(c["subs"], "같이 옮기기"))
+                cb = ttk.Combobox(r2, textvariable=vs, values=list(names.values()), width=15, state="readonly")
+                cb.pack(side="left", padx=4)
+
+                def on_sub(*_):
+                    c["subs"] = rev.get(vs.get(), "move")
+                    self.save_soon()
+                cb.bind("<<ComboboxSelected>>", on_sub)
+                self._keep_vars.append(vs)
+            if si.get("lone_folder"):
+                vf = tk.BooleanVar(value=c["folder"] == "folder")
+
+                def on_folder(*_):
+                    c["folder"] = "folder" if vf.get() else "file"
+                    self.save_soon()
+                tk.Checkbutton(box, text="폴더째 옮기기", variable=vf, command=on_folder, bg=rbg,
+                               activebackground=rbg, font=(FONT, 9)).pack(anchor="e")
+                self._keep_vars.append(vf)
 
     def refresh_card(self, s):
         """세트 하나만 다시 그림(전체 스크롤 위치 유지)"""
@@ -815,6 +1059,7 @@ class App:
         self.render_moves()
         if s is not None:
             self.refresh_card(s)
+        self.update_sum()
         if errs:
             messagebox.showwarning(APP_NAME, "일부는 옮기지 못했습니다.\n\n" + "\n".join(errs[:15]))
         self.status("옮기기 완료 · 결과에 저장했습니다." if not errs else "일부 옮기기 실패")
@@ -981,8 +1226,9 @@ class DetailDialog(tk.Toplevel):
                 tk.Label(det, text=b, bg="#ffffff", anchor="w", wraplength=950, justify="left").grid(row=k, column=1, sticky="w")
             ch = tk.Frame(f, bg="#f7f9fa")
             ch.pack(fill="x", padx=10, pady=(6, 10))
-            v = tk.StringVar(value="gone" if gone else ("keep" if iid == s["keep"] else "move"))
-            self.vars[iid] = {"act": v, "subs": tk.StringVar(value="move"), "folder": tk.StringVar(value="folder")}
+            c = self.app.choice(s, iid)
+            v = tk.StringVar(value="gone" if gone else c["act"])
+            self.vars[iid] = {"act": v, "subs": tk.StringVar(value=c["subs"]), "folder": tk.StringVar(value=c["folder"])}
             if gone:
                 tk.Label(ch, text="이미 옮긴 영상입니다. (되돌리려면 '이동 기록' 탭)", bg="#f7f9fa", fg="#999").pack(anchor="w", padx=8, pady=6)
             else:
@@ -998,14 +1244,13 @@ class DetailDialog(tk.Toplevel):
             self.blocks.setdefault(iid, {})["lbls"] = lbls
 
     def _load_side(self):
-        roots = self.app._roots()
+        try:
+            mover.fill_side(self.res, self.app.get_src, self.s["items"])
+        except Exception:
+            pass
         for iid in self.s["items"]:
-            it = dict(self.res["items"][iid], id=iid)
-            try:
-                si = mover.side_info(self.app.get_src(it["src"]), it, roots)
-            except Exception:
-                si = {"subs": [], "videos": 0, "lone_folder": False, "others": 0}
-            self.side[iid] = si
+            self.side[iid] = self.res["items"][iid].get("side") or {"subs": [], "videos": 0, "lone_folder": False,
+                                                                   "others": 0}
         self.app.q.append(("call", self.update_opts))
 
     def _load_frames(self):
@@ -1087,7 +1332,19 @@ class DetailDialog(tk.Toplevel):
     def execute(self):
         acts = {i: v["act"].get() for i, v in self.vars.items()}
         to_move = [i for i, a in acts.items() if a == "move"]
-        keepers = [i for i, a in acts.items() if a in ("keep", "gone") and a == "keep"]
+        keepers = [i for i, a in acts.items() if a == "keep"]
+        # 창에서 고른 것을 목록 선택에도 반영
+        if keepers:
+            if self.s.get("pick") not in keepers:
+                self.s["pick"] = self.s["keep"] if self.s["keep"] in keepers else keepers[0]
+        else:
+            self.s["pick"] = None
+        for i, v in self.vars.items():
+            if acts[i] != "gone":
+                c = self.app.choice(self.s, i)
+                c.update(extra=(acts[i] == "keep" and i != self.s["pick"]), subs=v["subs"].get(),
+                         folder=v["folder"].get())
+                self.app.choice(self.s, i)
         if not to_move:
             if messagebox.askyesno(APP_NAME, "옮길 영상이 없습니다. 이 세트를 '확인함'으로 표시할까요?", parent=self):
                 self.s["status"] = "done"
@@ -1100,40 +1357,19 @@ class DetailDialog(tk.Toplevel):
         if not keepers:
             if not messagebox.askyesno(APP_NAME, "남기는 영상이 하나도 없습니다. 그래도 모두 옮길까요?", parent=self, icon="warning"):
                 return
-        # 같은 폴더의 영상 둘 다 옮기는데 폴더째 옮기기 고른 경우 대비
         items = self.res["items"]
-        keeper = items[keepers[0]] if keepers else None
-        if keeper:
-            keeper = dict(keeper, id=keepers[0])
-        jobs = []
-        for i in to_move:
-            v = self.vars[i]
-            si = self.side[i]
-            whole = si["lone_folder"] and v["folder"].get() == "folder"
-            if whole and keeper and items[i]["dir"] == keeper["dir"]:
-                whole = False
-            jobs.append((i, v["subs"].get(), si["subs"], whole))
-        names = "\n".join("· " + items[i]["name"] + ("  (폴더째)" if w else "") for i, _, _, w in jobs)
-        if not messagebox.askyesno(APP_NAME, f"다음 {len(jobs)}개를 '{mover.DUP_FOLDER}' 폴더로 옮깁니다.\n\n{names}",
+        names = "\n".join("· " + items[i]["name"] + ("  (폴더째)" if self.side[i].get("lone_folder") and
+                                                       self.vars[i]["folder"].get() == "folder" else "") for i in to_move)
+        if not messagebox.askyesno(APP_NAME, f"다음 {len(to_move)}개를 '{mover.DUP_FOLDER}' 폴더로 옮깁니다.\n\n{names}",
                                    parent=self):
             return
         self.btn_go.config(state="disabled")
-        dest = self.app.cfg.get("dest") or None
-        s = self.s
 
         def work():
             # 미리보기 장면을 뽑느라 파일을 열고 있으면 옮기기가 막히므로 먼저 멈춤
             self.cancel_frames = True
             self.frames_thread.join(timeout=60)
-            errs = []
-            for i, sm, subs, whole in jobs:
-                it = dict(items[i], id=i)
-                try:
-                    mover.move_item(self.res, self.app.get_src(it["src"]), it, mover.DUP_FOLDER, dest, sm, subs,
-                                    whole, keeper=keeper, reason=f"세트 {s['no']}")
-                except Exception as e:
-                    errs.append(f"{it['name']}: {e}")
-            s["status"] = "done"
+            errs = self.app.exec_set(self.s)
             self.app.q.append(("call", lambda: self._done(errs)))
 
         threading.Thread(target=work, daemon=True).start()
@@ -1388,6 +1624,44 @@ def _ui_test(app, root, res, d):
         pump(0.2)
     pump(0.5)
     undo_ok = os.path.exists(os.path.join(d, "복사본", "원본 A 복사.mp4"))
+    # 목록에서 바로 남김/옮김 → 한번에 정리 (두 번 확인)
+    asked = []
+    messagebox.askyesno = lambda *a, **k: asked.append(a) or True
+    for x in res["sets"]:
+        x.pop("choice", None)
+        x.pop("pick", None)
+        for i in x["items"]:
+            app.choice(x, i)["extra"] = True      # 다른 세트는 전부 남김
+    s["status"] = "pending"
+    others = [i for i in s["items"] if i != cid]
+    app.set_pick(s, cid)                          # 남김 하나 누르면 나머지 자동 옮김
+    excl_ok = all(app.choice(s, i)["act"] == ("keep" if app.choice(s, i)["extra"] else "move") for i in others)
+    for i in others:
+        app.set_extra(s, i, False)
+    excl_ok = excl_ok and all(app.choice(s, i)["act"] == "move" for i in others) and app.choice(s, cid)["act"] == "keep"
+    app.set_pick(s, others[0])                    # 다시: others[0] 남김 + 추가 남김(나머지, 복사본 제외)
+    for i in others[1:]:
+        app.set_extra(s, i, True)
+    excl_ok = excl_ok and app.choice(s, cid)["act"] == "move"
+    print("excl_ok", excl_ok, flush=True)
+    app.rerender_keep()
+    pump(0.3)
+    app.organize_all()
+    t_end = time.time() + 20
+    while time.time() < t_end and getattr(app, "busy", False):
+        pump(0.2)
+    pump(0.5)
+    bulk_ok = excl_ok and (len(asked) == 2 and not os.path.exists(os.path.join(d, "복사본")) and s.get("status") == "done")
+    thumbs = [res["items"][i].get("thumb") for x in res["sets"] for i in x["items"]]
+    thumb_ok = all(t and os.path.exists(t) for t in thumbs)
+    side_card = res["items"][cid].get("side", {}).get("subs") == ["원본 A 복사.srt"]
+    print("bulk_ok", bulk_ok, "asked", len(asked), "thumb_ok", thumb_ok, "side_card", side_card, flush=True)
+    app.undo(None)
+    t_end = time.time() + 20
+    while time.time() < t_end and not os.path.exists(os.path.join(d, "복사본")):
+        pump(0.2)
+    pump(0.5)
+    undo_ok = undo_ok and bulk_ok and thumb_ok and side_card
     xlsx_ok = os.path.exists(os.path.splitext(res["_path"])[0] + ".xlsx")
     try:
         xlsx_ok = xlsx_ok and len(results.load(res["_path"]).get("moves", [])) == len(res["moves"]) > 0

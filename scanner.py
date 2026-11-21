@@ -8,9 +8,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import cache as cachemod
 import fingerprint as fpm
 import matcher
+import mover
 import sources
 
-DEFAULTS = {"mode": "quick", "broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0}
+DEFAULTS = {"mode": "quick", "thumbs": True, "broken": True, "precise": False, "audio": True, "sens": "보통", "workers": 0}
 
 
 def fmt_size(n):
@@ -139,8 +140,42 @@ class Scan:
             broken = [b for b in broken if b["kind"] == "readfail"]
         return self._result(t0, items, sets, broken)
 
+    def _finish_sets(self, items, sets):
+        """검사 끝난 뒤: 중복 세트 영상들의 자막·폴더 정보 + (빠른 검사) 썸네일 1장"""
+        byid = {it["id"]: it for it in items}
+        ids = [i for s in sets for i in s["items"]]
+        self.say("side", f"자막·폴더 확인 중 ({len(ids)}개)", None)
+        fake = {"items": byid, "sources": [sources.to_dict(s) for s in self.srcs.values()]}
+        mover.fill_side(fake, lambda sid: self.srcs[sid], ids, self.stopped)
+        if self.opts.get("mode") != "quick" or not self.opts.get("thumbs", True):
+            return
+        groups = []
+        for s in sets:
+            groups += s.get("exact") or [s["items"]]
+        n = len(groups)
+        for k, g in enumerate(groups):
+            if self.stopped():
+                return
+            first = byid[g[0]]
+            tp = os.path.join(cachemod.thumb_dir(), hashlib.md5(("q|" + first["key"]).encode()).hexdigest() + ".jpg")
+            ok = os.path.exists(tp)
+            if not ok:
+                self.say("thumb", f"썸네일 만드는 중 {k + 1}/{n} · {first['name']}", (k + 1) / max(1, n))
+                try:
+                    url = self.srcs[first["src"]].input_url(first)
+                    for at in (30.0, 3.0, 0.0):  # 영상 길이를 모르니 30초 → 3초 → 처음 순서로 시도
+                        if fpm.thumbnail(url, 0, tp, at=at if at else None):
+                            ok = True
+                            break
+                except Exception as e:
+                    self.log(f"썸네일 실패: {first['path']} · {e}")
+            if ok:
+                for i in g:
+                    byid[i]["thumb"] = tp
+
     def _result(self, t0, items, sets, broken):
         opts = self.opts
+        self._finish_sets(items, sets)
         res = {
             "version": 1,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -382,4 +417,4 @@ class Scan:
 
 
 def _slim(it):
-    return {k: it.get(k) for k in ("id", "src", "path", "name", "dir", "size", "mtime", "info", "thumb")}
+    return {k: it.get(k) for k in ("id", "src", "path", "name", "dir", "size", "mtime", "info", "thumb", "side")}

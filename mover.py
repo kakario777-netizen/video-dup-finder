@@ -10,8 +10,29 @@ BROKEN_FOLDER = "깨진영상"
 
 def side_info(src, item, roots):
     """같은 폴더의 자막 파일, 그 폴더에 영상이 몇 개인지, 폴더째 옮길 수 있는지"""
+    return side_from_entries(item, src.list_dir(item["dir"]), roots)
+
+
+def fill_side(res, get_src, ids, stop=None):
+    """여러 영상의 자막·폴더 정보를 한 번에 채움 (같은 폴더는 한 번만 읽음) → it['side']"""
+    roots = [d.get("path") or d.get("root") or "" for d in res.get("sources", [])]
+    cache = {}
+    for iid in ids:
+        if stop and stop():
+            return
+        it = res["items"][iid]
+        key = (it["src"], it["dir"])
+        if key not in cache:
+            try:
+                cache[key] = get_src(it["src"]).list_dir(it["dir"])
+            except Exception:
+                cache[key] = None
+        if cache[key] is not None:
+            it["side"] = side_from_entries(it, cache[key], roots)
+
+
+def side_from_entries(item, ents, roots):
     d = item["dir"]
-    ents = src.list_dir(d)
     subs = [n for n, isdir in ents if not isdir and n != item["name"] and sources.is_sub_for(item["name"], n)]
     videos = [n for n, isdir in ents if not isdir and sources.is_video(n)]
     subdirs = [n for n, isdir in ents if isdir]

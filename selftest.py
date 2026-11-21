@@ -144,7 +144,7 @@ def run(log=print):
     try:
         qc = cachemod.Cache(os.path.join(d, "_cache_q.db"))
         t3 = time.time()
-        qr = scanner.Scan([sources.LocalSource(d)], {"mode": "quick"}, None, qc).run()
+        qr = scanner.Scan([sources.LocalSource(d)], {"mode": "quick", "thumbs": False}, None, qc).run()
         qc.close()
         log(f"빠른 검사 {time.time() - t3:.2f}s")
         qsets = [sorted(qr["items"][i]["name"] for i in s["items"]) for s in qr["sets"]]
@@ -160,6 +160,19 @@ def run(log=print):
         ok = False
     finally:
         fftools.run, fftools.popen, fingerprint.thumbnail = saved
+    # 빠른 검사 + 썸네일: 찾은 중복만 1장
+    qc = cachemod.Cache(os.path.join(d, "_cache_q2.db"))
+    qr = scanner.Scan([sources.LocalSource(d)], {"mode": "quick", "thumbs": True}, None, qc).run()
+    qc.close()
+    th = [qr["items"][i].get("thumb") for s in qr["sets"] for i in s["items"]]
+    sd = [qr["items"][i].get("side") for s in qr["sets"] for i in s["items"]]
+    log("빠른 검사 썸네일:", [bool(t and os.path.exists(t)) for t in th], "자막:", [x and x.get("subs") for x in sd])
+    if not th or not all(t and os.path.exists(t) for t in th):
+        log("FAIL 빠른 검사 썸네일 없음")
+        ok = False
+    if not any(x and x.get("subs") == ["원본 A 복사.srt"] for x in sd):
+        log("FAIL 검사 직후 자막 정보 없음")
+        ok = False
     cdb.close()
     log("selftest ok" if ok else "selftest FAIL")
     return ok, d, res
