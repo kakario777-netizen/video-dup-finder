@@ -13,6 +13,20 @@ REL_NAME = {"same": "같은 영상", "contained_ab": "포함", "contained_ba": "
             "audio_only": "소리만 같음"}
 
 
+def item_choice(s, iid):
+    """영상별 선택. 체크 안 한 세트는 '미정'. 남김 = 고른 1개(pick) + '추가 남김', 나머지는 옮김"""
+    ch = s.setdefault("choice", {})
+    c = ch.setdefault(iid, {"subs": "move", "folder": "folder", "extra": False})
+    c.setdefault("extra", False)
+    c.setdefault("subs", "move")
+    c.setdefault("folder", "folder")
+    if not s.get("checked"):
+        c["act"] = "none"
+    else:
+        c["act"] = "keep" if (iid == s.get("pick") or c["extra"]) else "move"
+    return c
+
+
 def results_dir():
     base = os.path.join(os.path.expanduser("~"), "Documents")
     if os.environ.get("VDF_RESULTS"):
@@ -156,7 +170,7 @@ def write_xlsx(res, path):
     ws.append([f"검사 대상: {', '.join(res.get('targets', []))}"])
     ws.append([f"검사 시각: {res.get('created', '')} · {summary(res)}"])
     ws.append([])
-    head = ["세트", "종류", "추천", "상태", "파일명", "폴더", "용량(MB)", "길이", "해상도", "코덱", "비트레이트(kbps)",
+    head = ["세트", "종류", "확인", "선택", "추천", "상태", "파일명", "폴더", "용량(MB)", "길이", "해상도", "코덱", "비트레이트(kbps)",
             "관계", "판정 근거"]
     ws.append(head)
     hr = ws.max_row
@@ -164,6 +178,7 @@ def write_xlsx(res, path):
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="44546A")
     fills = [PatternFill("solid", fgColor="F2F2F2"), PatternFill("solid", fgColor="FFFFFF")]
+    blue = [PatternFill("solid", fgColor="CFE6F7"), PatternFill("solid", fgColor="E3F1FB")]
     moved = {m.get("item") for m in res.get("moves", []) if not m.get("undone") and m["type"] in ("file", "folder")}
     for s in res.get("sets", []):
         for iid in s["items"]:
@@ -181,14 +196,20 @@ def write_xlsx(res, path):
             for g in s.get("exact", []):
                 if iid in g and len(g) > 1 and not rel.startswith("완전히"):
                     rel = "완전히 같은 파일 있음 · " + rel
-            st = "이동함" if iid in moved else ("확인함" if s.get("status") == "done" else "")
-            ws.append([s["no"], KIND_NAME.get(s["kind"], s["kind"]), "남김" if iid == s.get("keep") else "이동 후보", st,
+            st = "이동함" if iid in moved else ("정리함" if s.get("status") == "done" else "")
+            ck = "확인함" if (s.get("checked") or s.get("status") == "done") else "미확인"
+            act = item_choice(s, iid)["act"]
+            sel = {"keep": "남김", "move": "옮김"}.get(act, "")
+            if act == "keep" and iid != s.get("pick"):
+                sel = "남김(추가)"
+            ws.append([s["no"], KIND_NAME.get(s["kind"], s["kind"]), ck, sel,
+                       "남김 추천" if iid == s.get("keep") else "", st,
                        it["name"], it["dir"], round((it["size"] or 0) / 1048576, 1),
                        fpm.fmt_t(info.get("duration")), res_text(info), info.get("vcodec", ""),
                        int((info.get("bitrate") or 0) / 1000), rel, basis])
             for c in ws[ws.max_row]:
-                c.fill = fills[s["no"] % 2]
-    widths = [6, 14, 9, 8, 40, 50, 10, 9, 11, 8, 14, 60, 10]
+                c.fill = blue[s["no"] % 2] if ck == "확인함" else fills[s["no"] % 2]
+    widths = [6, 14, 8, 10, 9, 8, 40, 50, 10, 9, 11, 8, 14, 60, 10]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = ws.cell(hr + 1, 1)

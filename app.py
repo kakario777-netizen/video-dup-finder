@@ -295,6 +295,10 @@ class App:
                           values=["전체"] + list(results.KIND_NAME.values()))
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda e: self.render_sets())
+        self.v_chk = tk.StringVar(value="전체")
+        cb2 = ttk.Combobox(fb, textvariable=self.v_chk, state="readonly", width=10, values=["전체", "미확인만", "확인한 것만"])
+        cb2.pack(side="left", padx=4)
+        cb2.bind("<<ComboboxSelected>>", lambda e: self.render_sets())
         self.v_hide = tk.BooleanVar(value=self.cfg.get("hide_done", False))
         ttk.Checkbutton(fb, text="정리 끝난 세트 숨기기", variable=self.v_hide, command=self.render_sets).pack(side="left", padx=8)
         self.btn_all = ttk.Button(fb, text="한번에 정리", style="Big.TButton", command=self.organize_all)
@@ -588,23 +592,26 @@ class App:
     # ───────────────────────── 남김/옮김 선택 ─────────────────────────
     def choice(self, s, iid):
         """영상별 선택. 남김 = 세트에서 고른 1개(pick) + '추가 남김' 체크한 것, 나머지는 자동으로 옮김"""
-        ch = s.setdefault("choice", {})
-        s.setdefault("pick", s["keep"])
-        c = ch.setdefault(iid, {"subs": "move", "folder": "folder", "extra": False})
-        c.setdefault("extra", False)
-        c.setdefault("subs", "move")
-        c.setdefault("folder", "folder")
-        c["act"] = "keep" if (iid == s["pick"] or c["extra"]) else "move"
-        return c
+        return results.item_choice(s, iid)
 
     def set_pick(self, s, iid):
         """'남김' 누름 → 이 영상만 남기고 나머지는 옮김 ('추가 남김' 체크한 것은 그대로 남김)"""
+        s["checked"] = True
         s["pick"] = iid
         self.choice(s, iid)["extra"] = False
         self._choice_changed(s)
 
     def set_extra(self, s, iid, on):
+        s["checked"] = True
         self.choice(s, iid)["extra"] = bool(on)
+        self._choice_changed(s)
+
+    def reset_choice(self, s):
+        """선택 취소 → 미확인으로"""
+        s["checked"] = False
+        s["pick"] = None
+        for c in s.get("choice", {}).values():
+            c["extra"] = False
         self._choice_changed(s)
 
     def _choice_changed(self, s):
@@ -666,8 +673,8 @@ class App:
         moved = self.moved_items()
         plan, skipped, nfiles, nbytes = [], 0, 0, 0
         for s in self.res["sets"]:
-            if s.get("status") == "done":
-                continue
+            if s.get("status") == "done" or not s.get("checked"):
+                continue  # 확인(체크)한 세트만
             ids = [i for i in s["items"] if i not in moved]
             mv = [i for i in ids if self.choice(s, i)["act"] == "move"]
             kp = [i for i in ids if self.choice(s, i)["act"] == "keep"]
@@ -680,11 +687,11 @@ class App:
             nfiles += len(mv)
             nbytes += sum(items[i]["size"] for i in mv)
         if not plan:
-            messagebox.showinfo(APP_NAME, "'옮김'으로 표시된 영상이 없습니다." +
+            messagebox.showinfo(APP_NAME, "'옮김'으로 표시된 영상이 없습니다. (확인·체크한 세트만 정리합니다)" +
                                 (f"\n(남김이 하나도 없는 세트 {skipped}개는 건너뜁니다)" if skipped else ""))
             return
         msg = (f"'옮김'으로 표시한 영상 {nfiles}개 ({scanner.fmt_size(nbytes)}, {len(plan)}세트)를 "
-               f"'{mover.DUP_FOLDER}' 폴더로 옮길까요?\n\n자막·폴더는 목록에서 고른 대로 처리합니다.")
+               f"'{mover.DUP_FOLDER}' 폴더로 옮길까요?\n\n체크한(하늘색) 세트만 정리하고, 미확인 세트는 건드리지 않습니다.\n자막·폴더는 목록에서 고른 대로 처리합니다.")
         if skipped:
             msg += f"\n\n※ 남김이 하나도 없는 세트 {skipped}개는 안전을 위해 건너뜁니다."
         if not messagebox.askyesno(APP_NAME + " — 한번에 정리 (1/2)", msg):
@@ -721,6 +728,11 @@ class App:
         if f != "전체" and results.KIND_NAME.get(s["kind"]) != f:
             return False
         if self.v_hide.get() and s.get("status") == "done":
+            return False
+        c = self.v_chk.get()
+        if c == "미확인만" and (s.get("checked") or s.get("status") == "done"):
+            return False
+        if c == "확인한 것만" and not s.get("checked"):
             return False
         return True
 
@@ -761,7 +773,8 @@ class App:
                 if i not in moved and self.choice(x, i)["act"] == "move":
                     n += 1
                     b += items[i]["size"]
-        self.sum_lbl.config(text=f"{len(self.res['sets'])}세트 · 옮김 표시 {n}개 ({scanner.fmt_size(b)})")
+        ck = sum(1 for x in self.res["sets"] if x.get("checked") or x.get("status") == "done")
+        self.sum_lbl.config(text=f"확인 {ck}/{len(self.res['sets'])}세트 · 옮김 표시 {n}개 ({scanner.fmt_size(b)})")
 
     def _render_more(self):
         if not self.res or self.rendered >= len(self.view_sets):
@@ -834,8 +847,10 @@ class App:
         items = self.res["items"]
         moved = self.moved_items()
         done = s.get("status") == "done"
-        bg = "#ffffff" if not done else "#eef0f2"
-        card = tk.Frame(self.list.inner, bg=bg, highlightthickness=1, highlightbackground="#d5d8dc")
+        checked = bool(s.get("checked"))
+        bg = "#eef0f2" if done else ("#dceefb" if checked else "#ffffff")
+        card = tk.Frame(self.list.inner, bg=bg, highlightthickness=2 if checked and not done else 1,
+                        highlightbackground="#5dade2" if checked and not done else "#d5d8dc")
         card.pack(fill="x", padx=6, pady=5)
         self.cards[s["no"]] = card
         hd = tk.Frame(card, bg=bg)
@@ -854,11 +869,16 @@ class App:
                    command=lambda s=s: DetailDialog(self, s)).pack(side="right")
         if done:
             tk.Label(hd, text="정리함", bg=bg, fg="#27ae60", font=(FONT, 10, "bold")).pack(side="right", padx=8)
+        elif checked:
+            ttk.Button(hd, text="선택 취소", command=lambda s=s: self.reset_choice(s)).pack(side="right", padx=4)
+            tk.Label(hd, text="✓ 확인함", bg=bg, fg="#1f6fb2", font=(FONT, 10, "bold")).pack(side="right", padx=8)
+        else:
+            tk.Label(hd, text="미확인", bg=bg, fg="#999", font=(FONT, 10)).pack(side="right", padx=8)
         for iid in self.ordered(s):
             it = items[iid]
             gone = iid in moved
             c = self.choice(s, iid)
-            rbg = bg if (done or gone or c["act"] == "keep") else "#fdf0ee"
+            rbg = bg if (done or gone or c["act"] != "move") else "#cfe3f3"
             row = tk.Frame(card, bg=rbg)
             row.pack(fill="x", padx=6, pady=2)
             im = tk.Label(row, image=self._thumb(it.get("thumb"), label=self.ext_label(it)), bg=rbg, cursor="hand2")
@@ -904,7 +924,6 @@ class App:
         r1 = tk.Frame(box, bg=rbg)
         r1.pack(anchor="e")
         is_pick = s.get("pick") == iid
-        keep = c["act"] == "keep"
         # 남김(세트에서 하나) — 누르면 나머지는 자동으로 옮김
         tk.Button(r1, text="● 남김" if is_pick else "○ 남김", width=7, font=(FONT, 10, "bold"),
                   bg="#27ae60" if is_pick else "#ffffff", fg="white" if is_pick else "#27ae60",
@@ -916,8 +935,9 @@ class App:
                        state="disabled" if is_pick else "normal", cursor="hand2",
                        command=lambda: self.set_extra(s, iid, ve.get())).pack(side="left", padx=(6, 0))
         self._keep_vars.append(ve)
-        st = tk.Label(r1, text="남김" if keep else "→ 옮김", width=6, font=(FONT, 10, "bold"),
-                      bg=rbg, fg="#27ae60" if keep else "#c0392b")
+        act = c["act"]
+        st = tk.Label(r1, text={"keep": "남김", "move": "→ 옮김"}.get(act, "미정"), width=6, font=(FONT, 10, "bold"),
+                      bg=rbg, fg={"keep": "#27ae60", "move": "#c0392b"}.get(act, "#aaa"))
         st.pack(side="left", padx=(6, 0))
         if c["act"] == "move":
             if si.get("subs"):
@@ -1334,6 +1354,8 @@ class DetailDialog(tk.Toplevel):
         to_move = [i for i, a in acts.items() if a == "move"]
         keepers = [i for i, a in acts.items() if a == "keep"]
         # 창에서 고른 것을 목록 선택에도 반영
+        if keepers or to_move:
+            self.s["checked"] = True
         if keepers:
             if self.s.get("pick") not in keepers:
                 self.s["pick"] = self.s["keep"] if self.s["keep"] in keepers else keepers[0]
@@ -1630,8 +1652,11 @@ def _ui_test(app, root, res, d):
     for x in res["sets"]:
         x.pop("choice", None)
         x.pop("pick", None)
+        x.pop("checked", None)
+    default_ok = all(app.choice(x, i)["act"] == "none" for x in res["sets"] for i in x["items"])
+    for x in res["sets"]:
         for i in x["items"]:
-            app.choice(x, i)["extra"] = True      # 다른 세트는 전부 남김
+            app.set_extra(x, i, True)               # 다른 세트는 전부 남김
     s["status"] = "pending"
     others = [i for i in s["items"] if i != cid]
     app.set_pick(s, cid)                          # 남김 하나 누르면 나머지 자동 옮김
@@ -1643,7 +1668,8 @@ def _ui_test(app, root, res, d):
     for i in others[1:]:
         app.set_extra(s, i, True)
     excl_ok = excl_ok and app.choice(s, cid)["act"] == "move"
-    print("excl_ok", excl_ok, flush=True)
+    excl_ok = excl_ok and default_ok
+    print("excl_ok", excl_ok, "default_ok", default_ok, flush=True)
     app.rerender_keep()
     pump(0.3)
     app.organize_all()
