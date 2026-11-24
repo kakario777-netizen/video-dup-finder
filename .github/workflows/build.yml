@@ -1,12 +1,18 @@
 name: 윈도우 프로그램 빌드
 
+# 릴리스할 때만 빌드: v로 시작하는 태그를 올리거나(예: v1.0.5) 직접 실행할 때
+# 외부인 풀 리퀘스트로는 실행되지 않음 (pull_request 트리거 없음)
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -22,7 +28,7 @@ jobs:
         id: ver
         shell: bash
         run: |
-          V="1.0.${{ github.run_number }}"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="1.0.${{ github.run_number }}"; fi
           echo "ver=$V" >> "$GITHUB_OUTPUT"
           echo "VERSION = \"$V\"" > version.py
 
@@ -123,7 +129,7 @@ jobs:
           tag_name: v${{ steps.ver.outputs.ver }}
           name: 중복 영상 찾기 v${{ steps.ver.outputs.ver }}
           body: |
-            ${{ github.event.head_commit.message }}
+            ${{ github.event.head_commit.message || '업데이트' }}
 
             ---
             처음 설치: VideoDupFinder_Setup.exe 를 받아 실행 → Program Files 에 설치되고 바탕화면에 '중복 영상 찾기' 바로가기가 생깁니다.

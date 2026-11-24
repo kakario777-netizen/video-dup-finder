@@ -1,11 +1,11 @@
 """검사 결과 저장 — 엑셀(셀 표) + 프로그램에서 다시 여는 json, 왼쪽 '저장된 검색 결과' 목록"""
-import base64
 import json
 import os
 import re
 import time
 
 import fingerprint as fpm
+import secure
 
 KIND_NAME = {"exact": "완전히 같은 파일", "same": "같은 영상", "contained": "포함된 영상",
              "partial": "일부 구간 겹침", "audio_only": "소리만 같음"}
@@ -57,16 +57,14 @@ def _enc(res):
     for s in res.get("sources", []):
         s = dict(s)
         if s.get("password"):
-            s["password"] = "b64:" + base64.b64encode(s["password"].encode()).decode()
+            s["password"] = secure.protect(s["password"])
         x["sources"].append(s)
     return x
 
 
 def _dec(res):
     for s in res.get("sources", []):
-        p = s.get("password") or ""
-        if p.startswith("b64:"):
-            s["password"] = base64.b64decode(p[4:]).decode()
+        s["password"] = secure.unprotect(s.get("password") or "")
     return res
 
 

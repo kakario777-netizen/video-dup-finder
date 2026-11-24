@@ -1,5 +1,4 @@
 """중복 영상 찾기 — 화면"""
-import base64
 import hashlib
 import json
 import os
@@ -16,6 +15,7 @@ import fftools
 import fingerprint as fpm
 import mover
 import results
+import secure
 import scanner
 import sources
 import updater
@@ -50,9 +50,7 @@ def load_cfg():
     except Exception:
         pass
     for t in c["targets"]:
-        p = t.get("password") or ""
-        if p.startswith("b64:"):
-            t["password"] = base64.b64decode(p[4:]).decode()
+        t["password"] = secure.unprotect(t.get("password") or "")
     return c
 
 
@@ -62,7 +60,7 @@ def save_cfg(c):
     for t in c["targets"]:
         t = dict(t)
         if t.get("password"):
-            t["password"] = "b64:" + base64.b64encode(t["password"].encode()).decode()
+            t["password"] = secure.protect(t["password"])
         x["targets"].append(t)
     try:
         with open(cfg_path(), "w", encoding="utf-8") as f:
@@ -1560,7 +1558,8 @@ class UpdateDialog(tk.Toplevel):
             self.q.append(("err", "개발용 실행이라 자동 적용은 건너뜁니다."))
             return
         try:
-            p = updater.download(info["url"], lambda g, t: self.q.append(("prog", g, t or info["size"])))
+            p = updater.download(info["url"], lambda g, t: self.q.append(("prog", g, t or info["size"])),
+                                 info["size"], info.get("sha256", ""))
             self.q.append(("apply", p))
         except Exception as e:
             self.q.append(("err", f"업데이트 중 문제가 생겼습니다.\n{e}"))
